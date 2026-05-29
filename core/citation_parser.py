@@ -1,0 +1,334 @@
+"""인용·준용 규정 파싱 (regex 기반)."""
+import re
+from dataclasses import dataclass, field
+
+# ── 패턴 ──────────────────────────────────────────────────────────────────
+# 타법 인용: 「법령명」 제X조제Y항...  (최우선 파싱)
+_CROSS_LAW = r'「([^」]+)」\s*제(\d+)조(?:의(\d+))?(?:제(\d+)항)?(?:제(\d+)호)?(?:제(\d+)목)?'
+# 타법 인용: 법령명이 낫표 없이 직접 쓰인 경우 (예: 상속세 및 증여세법 제60조)
+_NAMED_LAW = r'([가-힣][가-힣\sㆍ·]{1,40}(?:법률|법|영|령|규칙))\s*제(\d+)조(?:의(\d+))?(?:제(\d+)항)?(?:제(\d+)호)?(?:제(\d+)목)?'
+# 같은 법/령/영/규칙 인용: 같은 법 제X조제Y항...
+_SAME_LAW = r'(같은\s*(?:법|령|영|규칙))\s*제(\d+)조(?:의(\d+))?(?:제(\d+)항)?(?:제(\d+)호)?(?:제(\d+)목)?'
+# 같은 조 인용: 같은 조 제X항...
+_SAME_JO = r'(같은\s*조)\s*(?:제(\d+)항)?(?:제(\d+)호)?(?:제(\d+)목)?'
+# 조 번호를 포함한 직접 인용: 제X조, 제X조의Y, 제X조제Y항, ...
+_DIRECT = r"제(\d+)조(?:의(\d+))?(?:제(\d+)항)?(?:제(\d+)호)?(?:제(\d+)목)?"
+# 항/호/목 범위 인용: 제X항부터 제Y항까지
+_RANGE = r"제(\d+)(항|호|목)(?:부터|에서)\s*제(\d+)(항|호|목)까지"
+# 조 범위 인용: 제X조부터 제Y조까지
+_ARTICLE_RANGE = r"제(\d+)조(?:의(\d+))?(?:부터|에서)\s*제(\d+)조(?:의(\d+))?까지"
+# 조 내 항 범위 인용: 제X조의Y제A항부터 제B항까지 (항·부터 사이 선택적 공백 허용)
+_ARTICLE_HANG_RANGE = r"제(\d+)조(?:의(\d+))?제(\d+)항\s*(?:부터|에서)\s*제(\d+)항까지"
+# 동일 조 내 단독 항·호 인용: "제3항", "제2항과 제3항", "각 호" 등
+_INTRA = r"제(\d+)(항|호|목)(?!까지)"
+
+CROSS_LAW_RE = re.compile(_CROSS_LAW)
+NAMED_LAW_RE = re.compile(_NAMED_LAW)
+SAME_LAW_RE = re.compile(_SAME_LAW)
+SAME_JO_RE = re.compile(_SAME_JO)
+DIRECT_RE = re.compile(_DIRECT)
+RANGE_RE = re.compile(_RANGE)
+ARTICLE_RANGE_RE = re.compile(_ARTICLE_RANGE)
+ARTICLE_HANG_RANGE_RE = re.compile(_ARTICLE_HANG_RANGE)
+INTRA_RE = re.compile(_INTRA)
+
+
+@dataclass
+class Citation:
+    raw: str
+    jo: str
+    law_name: str = ""        # 타법 인용 시 법령명 (「소득세법」 or "같은 법" 등)
+    jo_sub: str = ""
+    hang: str = ""
+    hang_end: str = ""        # 항 범위 인용 시 끝 항번호 (예: "제1항~제5항" → hang="1", hang_end="5")
+    ho: str = ""
+    mok: str = ""
+    is_range: bool = False
+    range_end_jo: str = ""
+    range_end_jo_sub: str = ""
+    span: tuple[int, int] = field(default_factory=lambda: (0, 0))
+    relative: str = ""         # "같은법", "같은조" 등 문장 내 선행 참조 해석용
+
+
+def _sentence_start(text: str, pos: int) -> int:
+    """pos가 속한 문장의 시작 위치를 반환한다."""
+    starts = [text.rfind(mark, 0, pos) for mark in (".", "?", "!", "\n", ";")]
+    start = max(starts)
+    return 0 if start < 0 else start + 1
+
+
+def _is_inside(span: tuple[int, int], seen: set[tuple[int, int]]) -> bool:
+    return any(s[0] <= span[0] and span[1] <= s[1] for s in seen)
+
+
+def _resolve_relative_citations(citations: list[Citation], text: str) -> None:
+    """'같은 법/영/칙/조'를 같은 문장 앞쪽의 명시 인용으로 해석한다."""
+    for idx, cite in enumerate(citations):
+        if not cite.relative:
+            continue
+        sent_start = _sentence_start(text, cite.span[0])
+        previous = [
+            c for c in citations[:idx]
+            if c.span[0] >= sent_start and c.jo
+        ]
+        if not previous:
+            continue
+        if cite.relative == "같은조":
+            anchor = previous[-1]
+            cite.jo = anchor.jo
+            cite.jo_sub = anchor.jo_sub
+            cite.law_name = anchor.law_name
+        elif cite.law_name.startswith("같은"):
+            explicit_laws = [c for c in previous if c.law_name and not c.relative]
+            if explicit_laws:
+                cite.law_name = explicit_laws[-1].law_name
+
+
+def parse_citations(text: str) -> list[Citation]:
+    """텍스트에서 조문 인용 목록 추출."""
+    results: list[Citation] = []
+    seen: set[tuple[int, int]] = set()
+
+    # 1. 타법 인용: 「법령명」 제X조... (가장 긴 패턴, 최우선)
+    for m in CROSS_LAW_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        seen.add(m.span())
+        results.append(Citation(
+            raw=m.group(0),
+            law_name=m.group(1),
+            jo=m.group(2),
+            jo_sub=m.group(3) or "",
+            hang=m.group(4) or "",
+            ho=m.group(5) or "",
+            mok=m.group(6) or "",
+            span=m.span(),
+        ))
+
+    # 1.5. 낫표 없는 타법 인용: 법령명 제X조...
+    for m in NAMED_LAW_RE.finditer(text):
+        if m.span() in seen or _is_inside(m.span(), seen):
+            continue
+        # "같은 법" 계열은 SAME_LAW_RE가 처리한다.
+        if "같은" in m.group(1).replace(" ", ""):
+            continue
+        seen.add(m.span())
+        results.append(Citation(
+            raw=m.group(0),
+            law_name=m.group(1).strip(),
+            jo=m.group(2),
+            jo_sub=m.group(3) or "",
+            hang=m.group(4) or "",
+            ho=m.group(5) or "",
+            mok=m.group(6) or "",
+            span=m.span(),
+        ))
+
+    # 2. 같은 법/령/영/규칙 제X조...
+    for m in SAME_LAW_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        if any(s[0] <= m.start() and m.end() <= s[1] for s in seen):
+            continue
+        seen.add(m.span())
+        results.append(Citation(
+            raw=m.group(0),
+            law_name=m.group(1).replace(" ", ""),  # 정규화: "같은법", "같은령" 등
+            jo=m.group(2),
+            jo_sub=m.group(3) or "",
+            hang=m.group(4) or "",
+            ho=m.group(5) or "",
+            mok=m.group(6) or "",
+            span=m.span(),
+            relative=m.group(1).replace(" ", ""),
+        ))
+
+    # 2.5. 같은 조 제X항...
+    for m in SAME_JO_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        if _is_inside(m.span(), seen):
+            continue
+        seen.add(m.span())
+        results.append(Citation(
+            raw=m.group(0),
+            jo="",
+            hang=m.group(2) or "",
+            ho=m.group(3) or "",
+            mok=m.group(4) or "",
+            span=m.span(),
+            relative="같은조",
+        ))
+
+    # 3. 조문 범위: 제X조부터 제Y조까지
+    for m in ARTICLE_RANGE_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        seen.add(m.span())
+        results.append(Citation(
+            raw=m.group(0),
+            jo=m.group(1),
+            jo_sub=m.group(2) or "",
+            is_range=True,
+            range_end_jo=m.group(3),
+            range_end_jo_sub=m.group(4) or "",
+            span=m.span(),
+        ))
+
+    # 4. 항/호/목 범위
+    for m in RANGE_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        if any(s[0] <= m.start() and m.end() <= s[1] for s in seen):
+            continue
+        seen.add(m.span())
+        is_hang = m.group(2) == "항"
+        results.append(Citation(
+            raw=m.group(0),
+            jo="",
+            hang=m.group(1) if is_hang else "",
+            hang_end=m.group(3) if is_hang else "",
+            ho=m.group(1) if m.group(2) == "호" else "",
+            mok=m.group(1) if m.group(2) == "목" else "",
+            is_range=True,
+            span=m.span(),
+        ))
+
+    # 4.5. 조 내 항 범위: 제X조의Y제A항부터 제B항까지 (DIRECT_RE보다 먼저 처리)
+    for m in ARTICLE_HANG_RANGE_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        if any(s[0] <= m.start() and m.end() <= s[1] for s in seen):
+            continue
+        seen.add(m.span())
+        results.append(Citation(
+            raw=m.group(0),
+            jo=m.group(1),
+            jo_sub=m.group(2) or "",
+            hang=m.group(3),
+            hang_end=m.group(4),
+            is_range=True,
+            span=m.span(),
+        ))
+
+    # 5. 직접 인용 (본법 내)
+    for m in DIRECT_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        if any(s[0] <= m.start() and m.end() <= s[1] for s in seen):
+            continue
+        seen.add(m.span())
+        results.append(Citation(
+            raw=m.group(0),
+            jo=m.group(1),
+            jo_sub=m.group(2) or "",
+            hang=m.group(3) or "",
+            ho=m.group(4) or "",
+            mok=m.group(5) or "",
+            span=m.span(),
+        ))
+
+    # 6. 동일 조 내 단독 항·호·목 인용 (조번호 없는 "제3항" 형태)
+    for m in INTRA_RE.finditer(text):
+        if m.span() in seen:
+            continue
+        if any(s[0] <= m.start() and m.end() <= s[1] for s in seen):
+            continue
+        before = text[max(0, m.start() - 3):m.start()]
+        if "조" in before:
+            continue
+        seen.add(m.span())
+        unit = m.group(2)
+        results.append(Citation(
+            raw=m.group(0),
+            jo="",
+            hang=m.group(1) if unit == "항" else "",
+            ho=m.group(1) if unit == "호" else "",
+            mok=m.group(1) if unit == "목" else "",
+            span=m.span(),
+        ))
+
+    results.sort(key=lambda c: c.span[0])
+    _resolve_relative_citations(results, text)
+    return results
+
+
+def find_back_citations(
+    law_data: dict,
+    target_jo: str,
+    target_jo_sub: str = "",
+    target_hang: str = "",
+) -> list[dict]:
+    """동일 법령 내에서 target 조문(·항)을 인용하는 다른 조항 목록 반환.
+
+    Args:
+        law_data: get_law_text() 반환값
+        target_jo: 조번호 문자열 (예: "27")
+        target_jo_sub: 조의 부번호 (예: "2"  → 제27조의2)
+        target_hang: 항번호 — 지정 시 해당 항을 인용하는 조항만 반환
+
+    Returns:
+        [{"조번호": ..., "제목": ..., "인용": [raw_str, ...]}]
+    """
+    full_jo = f"{target_jo}의{target_jo_sub}" if target_jo_sub else target_jo
+    results: list[dict] = []
+
+    for article in law_data.get("조문목록", []):
+        if str(article.get("조번호", "")) == full_jo:
+            continue  # 자기 자신 제외
+        citations = parse_citations(article.get("내용", ""))
+        seen_cites: set = set()
+        matching = []
+        for c in citations:
+            if c.jo != target_jo:
+                continue
+            if target_jo_sub and c.jo_sub != target_jo_sub:
+                continue
+            if target_hang and c.hang:
+                if c.hang_end:
+                    # 항 범위 인용: target_hang이 [hang, hang_end] 안에 있는지 확인
+                    try:
+                        if not (int(c.hang) <= int(target_hang) <= int(c.hang_end)):
+                            continue
+                    except ValueError:
+                        continue
+                elif c.hang != target_hang:
+                    continue
+            key = (c.law_name, c.jo, c.jo_sub, c.hang, c.hang_end)
+            if key in seen_cites:
+                continue
+            seen_cites.add(key)
+            matching.append({
+                "raw": c.raw,
+                "law_name": c.law_name,
+                "jo": c.jo,
+                "jo_sub": c.jo_sub,
+                "hang": c.hang,
+                "hang_end": c.hang_end,
+            })
+        if matching:
+            results.append({
+                "조번호": article["조번호"],
+                "제목": article.get("제목", ""),
+                "내용": article.get("내용", ""),
+                "인용": matching,
+            })
+    return results
+
+
+def detect_number_shift(
+    citations: list[Citation],
+    inserted_jo: int,
+) -> list[Citation]:
+    """신설 조문(inserted_jo) 삽입 시 번호가 밀리는 인용 목록 반환."""
+    affected: list[Citation] = []
+    for c in citations:
+        if not c.jo:
+            continue
+        try:
+            jo_int = int(c.jo)
+        except ValueError:
+            continue
+        if jo_int >= inserted_jo:
+            affected.append(c)
+    return affected

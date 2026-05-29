@@ -1,0 +1,57 @@
+[
+  {
+    "id": "corp_business_vehicle_future",
+    "law_name": "법인세법",
+    "article_title_keywords": ["업무용승용차", "손금불산입"],
+    "outline_keywords": ["업무용승용차", "손금", "한도", "비용"],
+    "application_basis": "사업연도",
+    "effect_type": "장래효",
+    "article_title_suffix": "에 관한 적용례",
+    "application_sentence": "{jo_label}의 개정규정은 {law_ref} 시행 이후 최초로 개시하는 사업연도 분부터 적용한다.",
+    "source": "대표 선례: 법인세법 업무용승용차 관련비용 적용례 유형"
+  },
+  {
+    "id": "corp_tax_rate_future",
+    "law_name": "법인세법",
+    "article_title_keywords": ["세율"],
+    "outline_keywords": ["세율", "과세표준", "인하", "상향", "법인세"],
+    "application_basis": "사업연도",
+    "effect_type": "장래효",
+    "article_title_suffix": "에 관한 적용례",
+    "application_sentence": "{jo_label}의 개정규정은 {law_ref} 시행 이후 개시하는 사업연도 분부터 적용한다.",
+    "source": "대표 선례: 법인세율 개정 적용례 유형"
+  },
+  {
+    "id": "income_tax_period_future",
+    "law_name": "소득세법",
+    "article_title_keywords": ["필요경비", "소득금액", "세액공제", "세액감면"],
+    "outline_keywords": ["필요경비", "소득금액", "세액공제", "세액감면", "과세기간"],
+    "application_basis": "과세기간",
+    "effect_type": "장래효",
+    "article_title_suffix": "에 관한 적용례",
+    "application_sentence": "{jo_label}의 개정규정은 {law_ref} 시행 이후 개시하는 과세기간 분부터 적용한다.",
+    "source": "대표 선례: 소득세 과세기간 적용례 유형"
+  },
+  {
+    "id": "tax_return_filing_transitional",
+    "law_name": "",
+    "article_title_keywords": ["신고", "과세표준"],
+    "outline_keywords": ["신고", "과세표준", "신고기한"],
+    "application_basis": "신고",
+    "effect_type": "부진정소급효",
+    "article_title_suffix": "에 관한 적용례",
+    "application_sentence": "{jo_label}의 개정규정은 {law_ref} 시행 이후 과세표준을 신고하는 경우부터 적용한다.",
+    "source": "대표 선례: 신고분 적용례 유형"
+  },
+  {
+    "id": "transaction_date_retroactive",
+    "law_name": "",
+    "article_title_keywords": ["양도", "취득", "공급", "거래", "소득"],
+    "outline_keywords": ["양도", "취득", "공급", "거래", "발생"],
+    "application_basis": "발생/거래",
+    "effect_type": "진정소급효",
+    "article_title_suffix": "에 관한 적용례",
+    "application_sentence": "{jo_label}의 개정규정은 (시행일) 이후 발생하는 소득ㆍ거래분부터 적용한다.",
+    "source": "대표 선례: 거래ㆍ소득 발생일 적용례 유형"
+  }
+]
