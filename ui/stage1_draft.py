@@ -1,4 +1,5 @@
 """Stage 1: 법령 검색 → 개정 요강 입력 → GPT 초안 생성."""
+import hashlib
 import re
 import streamlit as st
 from core.law_api import search_laws, get_law_text
@@ -143,10 +144,15 @@ def _reset_draft_edit_state() -> None:
         "s1_accepted_suggests",
         "s1_hang_overrides",
     }
-    prefixes = ("s1_suggest_", "s1_hang_")
+    prefixes = ("s1_suggest_", "s1_hang_", "s1_amended_edit_")
     for key in list(st.session_state.keys()):
         if key in exact_keys or key.startswith(prefixes):
             del st.session_state[key]
+
+
+def _content_key(prefix: str, text: str) -> str:
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}_{digest}"
 
 
 def _extract_target_hang(outline: str) -> str:
@@ -605,11 +611,11 @@ def render(law_api_key: str, openai_api_key: str) -> None:
                 )
             with col_b:
                 st.markdown("**개정안**")
-                st.session_state["s1_amended_edit"] = effective_amended
                 amended_text = st.text_area(
                     "",
+                    value=effective_amended,
                     height=200,
-                    key="s1_amended_edit",
+                    key=_content_key("s1_amended_edit", effective_amended),
                     label_visibility="collapsed",
                 )
 
