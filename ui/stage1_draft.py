@@ -246,7 +246,9 @@ def _deterministic_related_reviews(article: dict, outline: str) -> str:
             rows.append(f'[검토] {sym}항({reason}): "{old_text}" → "{new_text}" — 코드 스캔')
 
         if directly_refs_target and ratio:
-            for amount_text in sorted(set(re.findall(r"[0-9,]+만원", content))):
+            old_pos = content.find(old_text)
+            proportional_scope = content[old_pos + len(old_text):] if old_pos >= 0 else content
+            for amount_text in sorted(set(re.findall(r"[0-9,]+만원", proportional_scope))):
                 amount = _parse_manwon_amount(amount_text)
                 if not amount or amount_text == old_text:
                     continue
@@ -270,6 +272,19 @@ def _merge_related_text(gpt_related: str, deterministic_related: str) -> str:
             seen.add(clean)
             lines.append(clean)
     return "\n".join(lines)
+
+
+def _related_changes(related_text: str) -> list[tuple[str, str, str]]:
+    """[제안]/[검토] 텍스트에서 (항기호, 구문구, 신문구)를 추출한다."""
+    changes: list[tuple[str, str, str]] = []
+    for matches in (_SUGGEST_RE.findall(related_text), _REVIEW_RE.findall(related_text)):
+        for match in matches:
+            sym_label, old_val, new_val = match[0], match[1], match[2]
+            char_m = _SYM_CHAR_RE.search(sym_label)
+            sym_char = char_m.group(0) if char_m else sym_label.strip()
+            if sym_char:
+                changes.append((sym_char, old_val, new_val))
+    return changes
 
 
 def _law_url(law_name: str, jo_ref: str = "") -> str:
@@ -337,6 +352,7 @@ def _apply_suggestions(
         return amended
 
     blocks = _split_hang_blocks(amended)
+    existing_syms = {sym for sym, _content in blocks if sym}
     orig_blocks = dict(_split_hang_blocks(original_article))
     result: list[str] = []
     for sym, content in blocks:
@@ -353,6 +369,58 @@ def _apply_suggestions(
                 result.append(modified)
         else:
             result.append(content)
+
+    for sym, changes in sym_changes.items():
+        if sym in existing_syms:
+            continue
+        base = orig_blocks.get(sym, "")
+        if not base:
+            continue
+        for old_val, new_val in changes:
+            base = base.replace(old_val, f"<u>{new_val}</u>")
+        result.append(base)
+
+    return "\n".join(result)
+
+
+def _apply_suggestions_to_current(
+    current: str,
+    accepted: list[tuple[str, str, str]],
+    original_article: str,
+) -> str:
+    """연관항 수락 목록을 현행에도 반영해 <del> 삭제 문구를 표시한다."""
+    from collections import defaultdict
+    sym_changes: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for sym, old_val, _new_val in accepted:
+        sym_changes[sym].append((old_val, _new_val))
+
+    if not sym_changes:
+        return current
+
+    blocks = _split_hang_blocks(current)
+    existing_syms = {sym for sym, _content in blocks if sym}
+    orig_blocks = dict(_split_hang_blocks(original_article))
+    result: list[str] = []
+
+    for sym, content in blocks:
+        if sym in sym_changes:
+            base = orig_blocks.get(sym, content)
+            for old_val, _new_val in sym_changes[sym]:
+                base = base.replace(old_val, f"<del>{old_val}</del>")
+            result.append(base)
+        else:
+            result.append(content)
+
+    for sym, changes in sym_changes.items():
+        if sym in existing_syms:
+            continue
+        base = orig_blocks.get(sym, "")
+        if not base:
+            continue
+        for old_val, _new_val in changes:
+            base = base.replace(old_val, f"<del>{old_val}</del>")
+        result.append(base)
+
     return "\n".join(result)
 
 
@@ -593,9 +661,15 @@ def render(law_api_key: str, openai_api_key: str) -> None:
             effective_amended = _apply_hang_overrides(amended_raw, saved_overrides)
 
             # [제안] 연관항 수락 반영
+            accepted_suggestions = st.session_state.get("s1_accepted_suggests", [])
+            effective_current = _apply_suggestions_to_current(
+                sections.get("현행", ""),
+                accepted_suggestions,
+                st.session_state.get("s1_article", {}).get("내용", ""),
+            )
             effective_amended = _apply_suggestions(
                 effective_amended,
-                st.session_state.get("s1_accepted_suggests", []),
+                accepted_suggestions,
                 st.session_state.get("s1_article", {}).get("내용", ""),
             )
 
@@ -604,9 +678,9 @@ def render(law_api_key: str, openai_api_key: str) -> None:
                 st.markdown("**현행**")
                 current_text = st.text_area(
                     "",
-                    value=sections.get("현행", ""),
+                    value=effective_current,
                     height=200,
-                    key="s1_current_edit",
+                    key=_content_key("s1_current_edit", effective_current),
                     label_visibility="collapsed",
                 )
             with col_b:
@@ -735,8 +809,38 @@ def render(law_api_key: str, openai_api_key: str) -> None:
                                     api_key=openai_api_key,
                                 )
                                 secs = _pds(draft)
+                                parallel_article = _article_from_text(entry["조문"], article_text)
+                                parallel_article["내용"] = article_text
+                                parallel_analysis_outline = (
+                                    secs.get("지시문", "")
+                                    + "\n"
+                                    + parallel_outline
+                                )
+                                parallel_current = _source_current_section(
+                                    parallel_article,
+                                    parallel_analysis_outline,
+                                    secs.get("현행", ""),
+                                )
+                                parallel_related = _merge_related_text(
+                                    secs.get("연관항", ""),
+                                    _deterministic_related_reviews(
+                                        parallel_article,
+                                        parallel_analysis_outline,
+                                    ),
+                                )
+                                parallel_changes = _related_changes(parallel_related)
+                                parallel_current = _apply_suggestions_to_current(
+                                    parallel_current,
+                                    parallel_changes,
+                                    article_text,
+                                )
+                                parallel_amended = _apply_suggestions(
+                                    secs.get("개정안", ""),
+                                    parallel_changes,
+                                    article_text,
+                                )
                                 parallel_buchik, _precedent = _build_buchik(
-                                    _article_from_text(entry["조문"], article_text),
+                                    parallel_article,
                                     entry["법령명"],
                                     application_basis,
                                     outline,
@@ -745,7 +849,7 @@ def render(law_api_key: str, openai_api_key: str) -> None:
                                     "법령명": entry["법령명"],
                                     "조문": entry["조문"],
                                     "instruction": secs.get("지시문", ""),
-                                    "rows": _build_comparison_rows(secs.get("현행", ""), secs.get("개정안", "")),
+                                    "rows": _build_comparison_rows(parallel_current, parallel_amended),
                                     "buchik": parallel_buchik,
                                 })
                             except Exception as e:
